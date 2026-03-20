@@ -20,13 +20,7 @@ EOF
 # Download age binary and proof, then verify with sigsum
 RUN <<EOF
 set -ex
-case "${TARGETARCH}" in
-  amd64) ARCH="amd64" ;;
-  arm64) ARCH="arm64" ;;
-  arm)   ARCH="arm"   ;;
-  *)     echo "Unsupported architecture: ${TARGETARCH}" && exit 1 ;;
-esac
-download_url="https://github.com/FiloSottile/age/releases/download/v${AGE_VERSION}/age-v${AGE_VERSION}-linux-${ARCH}.tar.gz"
+download_url="https://github.com/FiloSottile/age/releases/download/v${AGE_VERSION}/age-v${AGE_VERSION}-linux-${TARGETARCH}.tar.gz"
 wget -O /tmp/age.tar.gz "${download_url}"
 if wget --spider "${download_url}.proof" 2>/dev/null; then
   wget -O /tmp/age.tar.gz.proof "${download_url}.proof"
