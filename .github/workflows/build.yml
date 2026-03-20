@@ -1,0 +1,138 @@
+name: Build and Push Docker Image
+
+on:
+  schedule:
+    - cron: "0 0 1 * *" # monthly on the 1st
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository_owner }}/age
+
+jobs:
+  detect-versions:
+    runs-on: ubuntu-latest
+    outputs:
+      missing: ${{ steps.diff.outputs.missing }}
+    permissions:
+      packages: read
+    steps:
+      - name: Get all age release versions
+        id: releases
+        run: |
+          # Fetch all releases (paginated), extract non-prerelease tag names
+          RELEASES="[]"
+          PAGE=1
+          while true; do
+            RESPONSE=$(curl -sf "https://api.github.com/repos/FiloSottile/age/releases?per_page=100&page=${PAGE}")
+            BATCH=$(echo "$RESPONSE" | jq -r '[.[] | select(.prerelease == false and .draft == false) | .tag_name | ltrimstr("v")]')
+            if [ "$(echo "$BATCH" | jq 'length')" -eq 0 ]; then
+              break
+            fi
+            RELEASES=$(echo -e "${RELEASES}\n${BATCH}" | jq -s 'add | unique')
+            PAGE=$((PAGE + 1))
+          done
+
+          # Filter to versions that have linux-amd64 tarballs
+          VALID="[]"
+          for VERSION in $(echo "$RELEASES" | jq -r '.[]'); do
+            URL="https://github.com/FiloSottile/age/releases/download/v${VERSION}/age-v${VERSION}-linux-amd64.tar.gz"
+            if curl -sfIo /dev/null -w '' "$URL" 2>/dev/null; then
+              VALID=$(echo "$VALID" | jq --arg v "$VERSION" '. + [$v]')
+            fi
+          done
+          echo "versions=$(echo "$VALID" | jq -c '.')" >> "$GITHUB_OUTPUT"
+
+      - name: Get existing package versions
+        id: existing
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          EXISTING="[]"
+          PAGE=1
+          while true; do
+            RESPONSE=$(gh api \
+              "/user/packages/container/age/versions?per_page=100&page=${PAGE}" \
+              --jq '[.[].metadata.container.tags[]] | unique' 2>/dev/null) || break
+            if [ "$(echo "$RESPONSE" | jq 'length')" -eq 0 ]; then
+              break
+            fi
+            EXISTING=$(echo -e "${EXISTING}\n${RESPONSE}" | jq -s 'add | unique')
+            PAGE=$((PAGE + 1))
+          done
+          echo "versions=$(echo "$EXISTING" | jq -c '.')" >> "$GITHUB_OUTPUT"
+
+      - name: Compute missing versions
+        id: diff
+        run: |
+          RELEASES='${{ steps.releases.outputs.versions }}'
+          EXISTING='${{ steps.existing.outputs.versions }}'
+          MISSING=$(jq -n --argjson releases "$RELEASES" --argjson existing "$EXISTING" \
+            '$releases - $existing')
+          echo "missing=$(echo "$MISSING" | jq -c '.')" >> "$GITHUB_OUTPUT"
+          echo "Missing versions: $(echo "$MISSING" | jq -r 'join(", ")')"
+
+  build-and-push:
+    needs: detect-versions
+    if: needs.detect-versions.outputs.missing != '[]'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write # for Cosign keyless signing
+    strategy:
+      matrix:
+        version: ${{ fromJson(needs.detect-versions.outputs.missing) }}
+      fail-fast: false
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Determine latest age version
+        id: latest
+        run: |
+          LATEST=$(curl -sf "https://api.github.com/repos/FiloSottile/age/releases/latest" | jq -r '.tag_name | ltrimstr("v")')
+          echo "version=${LATEST}" >> "$GITHUB_OUTPUT"
+
+      - name: Set image tags
+        id: tags
+        run: |
+          TAGS="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ matrix.version }}"
+          if [ "${{ matrix.version }}" = "${{ steps.latest.outputs.version }}" ]; then
+            TAGS="${TAGS},${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest"
+          fi
+          echo "tags=${TAGS}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@v4
+
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64,linux/arm64,linux/arm/v7
+          build-args: |
+            AGE_VERSION=${{ matrix.version }}
+          tags: ${{ steps.tags.outputs.tags }}
+
+      - name: Sign image with Cosign
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          cosign sign --yes "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${DIGEST}"
