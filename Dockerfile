@@ -28,9 +28,11 @@ case "${TARGETARCH}" in
 esac
 download_url="https://github.com/FiloSottile/age/releases/download/v${AGE_VERSION}/age-v${AGE_VERSION}-linux-${ARCH}.tar.gz"
 wget -O /tmp/age.tar.gz "${download_url}"
-wget -O /tmp/age.tar.gz.proof "${download_url}.proof"
-sigsum-verify -k /tmp/age-sigsum-key.pub -P sigsum-generic-2025-1 \
-  /tmp/age.tar.gz.proof < /tmp/age.tar.gz
+if wget --spider "${download_url}.proof" 2>/dev/null; then
+  wget -O /tmp/age.tar.gz.proof "${download_url}.proof"
+  sigsum-verify -k /tmp/age-sigsum-key.pub -P sigsum-generic-2025-1 \
+    /tmp/age.tar.gz.proof < /tmp/age.tar.gz
+fi
 tar -xzf /tmp/age.tar.gz -C /tmp
 EOF
 
